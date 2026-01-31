@@ -1,0 +1,3 @@
+*.acmi
+*.txt
+__pycache__
