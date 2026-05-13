@@ -1,3 +1,8 @@
 *.acmi
 *.txt
 __pycache__
+data
+.claudeignore
+CLAUDE.md
+old/
+.claude
