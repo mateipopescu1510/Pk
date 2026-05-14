@@ -22,6 +22,13 @@ MISSILE_NAMES = (
 _OBJ_ID_RE = re.compile(r"^[0-9a-fA-F]+$")
 _TIME_RE = re.compile(r"^#([+-]?\d+(?:\.\d+)?)$")
 
+# Velocity derivation guards. ACMI samples at ~5 Hz (dt ~0.2 s); a dt below
+# DT_FLOOR means a near-duplicate timestamp, and a derived speed above SPD_CAP
+# means a position teleport (object respawn). Either way the velocity is
+# meaningless, so leave it at 0.0 rather than emitting a garbage value.
+DT_FLOOR = 0.05      # s
+SPD_CAP = 2000.0     # m/s — above any aircraft or whitelisted missile
+
 
 def _init_db(conn: sqlite3.Connection) -> None:
     conn.executescript("""
@@ -171,11 +178,13 @@ def parse_file(acmi_path: Path, db_path: Path) -> tuple[int, int]:
             if obj_id in prev:
                 pt, pu, pv, _ = prev[obj_id]
                 dt = current_t - pt
-                if dt > 1e-6:
-                    vx = (u - pu) / dt
-                    vy = (v - pv) / dt
-                    spd = math.hypot(vx, vy)
-                    mach = spd / _sos(alt)
+                if dt >= DT_FLOOR:
+                    cvx = (u - pu) / dt
+                    cvy = (v - pv) / dt
+                    cspd = math.hypot(cvx, cvy)
+                    if cspd <= SPD_CAP:
+                        vx, vy, spd = cvx, cvy, cspd
+                        mach = spd / _sos(alt)
 
             prev[obj_id] = (current_t, u, v, alt)
             buf.append((run_id, obj_id, current_t, u, v, alt, vx, vy, spd, mach))
