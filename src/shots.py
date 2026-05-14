@@ -31,6 +31,25 @@ def _whitelisted(name: str) -> bool:
     return any(w in n for w in MISSILE_NAMES)
 
 
+def _guidance(name: str) -> Optional[str]:
+    """Guidance category: ARH (active radar), IR, or SARH (semiactive radar).
+
+    DCS missile names mix hyphens and underscores almost at random, so we
+    normalise separators and match on substrings. The R-27 family splits by
+    variant: a 'T' in the suffix means the IR seeker, otherwise semiactive.
+    """
+    n = name.lower().replace("-", "_").replace(" ", "_")
+    if any(k in n for k in ("aim_120", "aim_54", "pl_12", "sd_10", "r_77", "p_77")):
+        return "ARH"
+    if any(k in n for k in ("aim_9", "r_73", "p_73")):
+        return "IR"
+    if "aim_7" in n:
+        return "SARH"
+    if "27" in n:  # R-27 family
+        return "IR" if "t" in n.split("27", 1)[1] else "SARH"
+    return None
+
+
 def _init_db(conn: sqlite3.Connection) -> None:
     conn.executescript("""
         DROP TABLE IF EXISTS shots;
@@ -54,6 +73,7 @@ def _init_db(conn: sqlite3.Connection) -> None:
             cpa           REAL,
             hit           INTEGER,
             label_conf    TEXT,
+            guidance      TEXT,
             PRIMARY KEY (run_id, missile_id)
         );
     """)
@@ -206,7 +226,7 @@ def process_run(conn: sqlite3.Connection, run_id: str) -> list[tuple]:
             run_id, m["obj_id"], m["name"], launcher_id, target_id, t0,
             range_lt, l["alt"], t["alt"], t["alt"] - l["alt"],
             l["spd"], t["spd"], l["mach"], t["mach"],
-            ata, ta, cpa, hit, conf,
+            ata, ta, cpa, hit, conf, _guidance(m["name"]),
         ))
     return rows
 
@@ -220,7 +240,7 @@ def build_shots(db_path: Path) -> None:
         rows = process_run(conn, run_id)
         if rows:
             conn.executemany(
-                "INSERT OR REPLACE INTO shots VALUES (" + ",".join(["?"] * 19) + ")",
+                "INSERT OR REPLACE INTO shots VALUES (" + ",".join(["?"] * 20) + ")",
                 rows,
             )
             conn.commit()

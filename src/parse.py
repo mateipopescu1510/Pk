@@ -1,9 +1,13 @@
 """
 Parse ACMI text files into SQLite objects and samples tables.
 
-T= field is 9 positional slots: lon|lat|alt|roll|pitch|yaw|U|V|hdg
-Empty slot = carry forward. U (index 6) and V (index 7) are East/North
-meter offsets from the file's ReferenceLongitude/Latitude.
+The T= field is variable-length; the field count determines the layout:
+  3: lon|lat|alt                  5: lon|lat|alt|U|V
+  6: lon|lat|alt|roll|pitch|yaw   9: lon|lat|alt|roll|pitch|yaw|U|V|hdg
+Only lon|lat|alt are present in every variant, so we ignore the U/V slots
+(their index shifts between layouts) and project lon/lat to local meters
+ourselves using the file's ReferenceLongitude/Latitude header. Empty
+field = carry forward.
 """
 from __future__ import annotations
 
@@ -28,6 +32,15 @@ _TIME_RE = re.compile(r"^#([+-]?\d+(?:\.\d+)?)$")
 # meaningless, so leave it at 0.0 rather than emitting a garbage value.
 DT_FLOOR = 0.05      # s
 SPD_CAP = 2000.0     # m/s — above any aircraft or whitelisted missile
+
+_METERS_PER_DEG = 111319.49  # WGS84 mean; exact value cancels in relative geometry
+
+
+def _project(lon: float, lat: float, ref_lon: float, ref_lat: float) -> tuple[float, float]:
+    """Equirectangular lon/lat -> (East, North) meters from the reference point."""
+    u = (lon - ref_lon) * _METERS_PER_DEG * math.cos(math.radians(ref_lat))
+    v = (lat - ref_lat) * _METERS_PER_DEG
+    return u, v
 
 
 def _init_db(conn: sqlite3.Connection) -> None:
@@ -90,12 +103,15 @@ def parse_file(acmi_path: Path, db_path: Path) -> tuple[int, int]:
         conn.close()
         return 0, 0
 
-    # carry[obj_id]: 9-slot T= state (None = not yet seen)
+    # carry[obj_id]: [lon, lat, alt] T= state (None = not yet seen)
     carry: dict[str, list] = {}
     # meta[obj_id]: classification + lifecycle info
     meta: dict[str, dict] = {}
     # prev[obj_id]: (t, u, v, alt) for velocity derivation
     prev: dict[str, tuple] = {}
+    # global reference point (from object "0" header), set once near file start
+    ref_lon: Optional[float] = None
+    ref_lat: Optional[float] = None
 
     buf: list[tuple] = []
 
@@ -144,6 +160,13 @@ def parse_file(acmi_path: Path, db_path: Path) -> tuple[int, int]:
                 else:
                     kv[k] = v.strip()
 
+            if obj_id == "0":
+                if "ReferenceLongitude" in kv:
+                    ref_lon = float(kv["ReferenceLongitude"])
+                if "ReferenceLatitude" in kv:
+                    ref_lat = float(kv["ReferenceLatitude"])
+                continue
+
             if obj_id not in meta:
                 obj_class = _classify(kv.get("Type", ""), kv.get("Name", ""))
                 meta[obj_id] = {
@@ -155,24 +178,28 @@ def parse_file(acmi_path: Path, db_path: Path) -> tuple[int, int]:
                     "last_t": current_t,
                     "removed_t": None,
                 }
-                carry[obj_id] = [None] * 9
+                carry[obj_id] = [None, None, None]
             else:
                 meta[obj_id]["last_t"] = current_t
 
             if meta[obj_id]["class"] is None or t_val is None:
                 continue
+            if ref_lon is None or ref_lat is None:
+                continue
 
+            # First 3 T= fields are lon|lat|alt in every layout variant.
             state = carry[obj_id]
-            for i, s in enumerate(t_val.split("|")[:9]):
+            for i, s in enumerate(t_val.split("|")[:3]):
                 if s.strip():
                     try:
                         state[i] = float(s)
                     except ValueError:
                         pass
 
-            u, v, alt = state[6], state[7], state[2]
-            if u is None or v is None or alt is None:
+            lon, lat, alt = state[0], state[1], state[2]
+            if lon is None or lat is None or alt is None:
                 continue
+            u, v = _project(lon, lat, ref_lon, ref_lat)
 
             vx = vy = spd = mach = 0.0
             if obj_id in prev:
